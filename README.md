@@ -39,6 +39,14 @@ click; tiles currently being fetched show as translucent blue rectangles. Roads 
 deduplicated across tiles by OSM way id, and jumping to a new ZIP clears the map and
 discards any in-flight loads.
 
+Fetching is tuned for the public Overpass instances: prefetches run as small chunks in
+parallel across three endpoints (`src/overpass.ts`), requests use quadtile-sorted output
+and a 20 s client timeout so a congested instance fails over quickly, the most recently
+successful endpoint is tried first, and every fetched tile is persisted in IndexedDB for
+30 days (`src/tilecache.ts`) so revisited areas load instantly without touching Overpass
+at all. When all public instances are overloaded (it happens at peak times), the app
+surfaces a retry message — there is no way around that short of self-hosting Overpass.
+
 ## Tuning
 
 All tier definitions — OSM class mapping, color, line width — live in one constant

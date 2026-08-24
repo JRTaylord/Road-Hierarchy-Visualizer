@@ -3,6 +3,7 @@ import { PathLayer, PolygonLayer } from '@deck.gl/layers';
 import { TIERS, tierOf } from './tiers';
 import type { RoadFeature } from './types';
 import { fetchRoadTiles, geocodeZip, tileAt, tileBbox, tileKey, type TileCoord } from './overpass';
+import { getCachedTile, putCachedTile } from './tilecache';
 import './style.css';
 
 const DEFAULT_ZIP = '98402'; // downtown Tacoma
@@ -158,7 +159,7 @@ function revealCached(t: TileCoord): void {
     hoverTile = null;
   }
   rebuild();
-  void loadTiles(neighborsOf([t]), { preload: true });
+  void preloadTiles(neighborsOf([t]));
 }
 
 const deck = new Deck({
@@ -217,54 +218,137 @@ function neighborsOf(tiles: TileCoord[]): TileCoord[] {
   return [...out.values()];
 }
 
-async function loadTiles(tiles: TileCoord[], opts: { preload?: boolean } = {}): Promise<void> {
+/** Split a multi-tile Overpass response into per-tile buckets. A way belongs
+ * to every requested tile containing one of its vertices (a way clipping a
+ * tile corner without a vertex inside is missed — rare, and it appears once a
+ * neighboring tile renders). */
+function bucketByTile(tiles: TileCoord[], ways: Map<number, RoadFeature>): Map<string, CachedTile> {
+  const buckets = new Map<string, CachedTile>(
+    tiles.map((t) => [tileKey(t), { coord: t, ways: new Map() }])
+  );
+  for (const [id, feature] of ways) {
+    for (const [lng, lat] of feature.geometry.coordinates) {
+      buckets.get(tileKey(tileAt(lng, lat)))?.ways.set(id, feature);
+    }
+  }
+  return buckets;
+}
+
+/** Partition tiles into local-cache hits (handled via `onHit`) and misses. */
+async function splitByCache(
+  tiles: TileCoord[],
+  gen: number,
+  onHit: (t: TileCoord, ways: Map<number, RoadFeature>) => void
+): Promise<TileCoord[] | null> {
+  const lookups = await Promise.all(
+    tiles.map(async (t) => ({ t, hit: await getCachedTile(tileKey(t)) }))
+  );
+  if (gen !== generation) return null;
+  const misses: TileCoord[] = [];
+  let anyHit = false;
+  for (const { t, hit } of lookups) {
+    if (isKnown(tileKey(t))) continue; // state may have moved during the await
+    if (hit) {
+      onHit(t, hit);
+      anyHit = true;
+    } else {
+      misses.push(t);
+    }
+  }
+  if (anyHit) rebuild();
+  return misses;
+}
+
+async function loadTiles(tiles: TileCoord[]): Promise<void> {
   const fresh = tiles.filter((t) => !isKnown(tileKey(t)));
   if (fresh.length === 0) return;
-
   const gen = generation;
-  fresh.forEach((t) => pendingTiles.set(tileKey(t), t));
+
+  const misses = await splitByCache(fresh, gen, (t, ways) => {
+    renderWays(ways);
+    renderedTiles.add(tileKey(t));
+  });
+  if (misses === null) return; // user jumped to a new ZIP mid-flight
+  if (misses.length === 0) {
+    void preloadTiles(neighborsOf(fresh));
+    return;
+  }
+
+  misses.forEach((t) => pendingTiles.set(tileKey(t), t));
   if (hoverKey && pendingTiles.has(hoverKey)) {
     hoverKey = null;
     hoverTile = null;
   }
-  if (!opts.preload) setStatus('Loading roads…');
+  setStatus('Loading roads…');
   rebuild(); // show the pending-tile overlay immediately
   try {
-    const ways = await fetchRoadTiles(fresh);
-    if (gen !== generation) return; // user jumped to a new ZIP mid-flight
+    const ways = await fetchRoadTiles(misses);
+    if (gen !== generation) return;
 
-    if (opts.preload) {
-      // Hold the data hidden, attributed per tile so a click reveals just that
-      // tile. A way belongs to every fetched tile containing one of its
-      // vertices (a way clipping a tile corner without a vertex inside is
-      // missed — rare, and it appears once a neighboring tile renders).
-      const buckets = new Map<string, CachedTile>(
-        fresh.map((t) => [tileKey(t), { coord: t, ways: new Map() }])
-      );
-      for (const [id, feature] of ways) {
-        for (const [lng, lat] of feature.geometry.coordinates) {
-          buckets.get(tileKey(tileAt(lng, lat)))?.ways.set(id, feature);
-        }
-      }
-      for (const [key, bucket] of buckets) cachedTiles.set(key, bucket);
-    } else {
-      renderWays(ways);
-      fresh.forEach((t) => renderedTiles.add(tileKey(t)));
-      setStatus(null);
-      // Prefetch the surrounding ring (hidden until clicked) so the next
-      // click is instant. Preloads don't cascade: only explicit loads and
-      // reveals trigger this.
-      void loadTiles(neighborsOf(fresh), { preload: true });
-    }
+    for (const [key, bucket] of bucketByTile(misses, ways)) putCachedTile(key, bucket.ways);
+    renderWays(ways);
+    misses.forEach((t) => renderedTiles.add(tileKey(t)));
+    setStatus(null);
+    // Prefetch the surrounding ring (hidden until clicked) so the next
+    // click is instant. Preloads don't cascade: only explicit loads and
+    // reveals trigger this.
+    void preloadTiles(neighborsOf(fresh));
   } catch (err) {
     console.error(err);
-    if (gen === generation && !opts.preload) {
-      setStatus('Failed to load roads — click again to retry');
-    }
+    if (gen === generation) setStatus('Failed to load roads — click again to retry');
   } finally {
-    if (gen === generation) fresh.forEach((t) => pendingTiles.delete(tileKey(t)));
+    if (gen === generation) misses.forEach((t) => pendingTiles.delete(tileKey(t)));
     rebuild();
   }
+}
+
+// Small chunks fetched concurrently finish much sooner than one big batched
+// query: wall time is the slowest chunk, endpoints are used in parallel, and
+// tiles become clickable as each chunk arrives instead of all at once.
+const PRELOAD_CHUNK_SIZE = 4;
+
+async function preloadTiles(tiles: TileCoord[]): Promise<void> {
+  const fresh = tiles.filter((t) => !isKnown(tileKey(t)));
+  if (fresh.length === 0) return;
+  const gen = generation;
+
+  const misses = await splitByCache(fresh, gen, (t, ways) => {
+    cachedTiles.set(tileKey(t), { coord: t, ways });
+  });
+  if (misses === null || misses.length === 0) return;
+
+  misses.forEach((t) => pendingTiles.set(tileKey(t), t));
+  if (hoverKey && pendingTiles.has(hoverKey)) {
+    hoverKey = null;
+    hoverTile = null;
+  }
+  rebuild();
+
+  const chunks: TileCoord[][] = [];
+  for (let i = 0; i < misses.length; i += PRELOAD_CHUNK_SIZE) {
+    chunks.push(misses.slice(i, i + PRELOAD_CHUNK_SIZE));
+  }
+  await Promise.all(
+    chunks.map(async (chunk, i) => {
+      try {
+        const ways = await fetchRoadTiles(chunk, i);
+        if (gen !== generation) return;
+
+        // Hold the data hidden until clicked, and persist it locally.
+        for (const [key, bucket] of bucketByTile(chunk, ways)) {
+          cachedTiles.set(key, bucket);
+          putCachedTile(key, bucket.ways);
+        }
+      } catch (err) {
+        console.warn('Preload chunk failed:', err);
+      } finally {
+        if (gen === generation) {
+          chunk.forEach((t) => pendingTiles.delete(tileKey(t)));
+          rebuild();
+        }
+      }
+    })
+  );
 }
 
 function tilesAround(lng: number, lat: number): TileCoord[] {
