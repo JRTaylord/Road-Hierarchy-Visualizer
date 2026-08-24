@@ -1,31 +1,14 @@
 import { Deck, FlyToInterpolator, type PickingInfo } from '@deck.gl/core';
-import { PathLayer, PolygonLayer } from '@deck.gl/layers';
+import { PathLayer } from '@deck.gl/layers';
+import { TileLayer } from '@deck.gl/geo-layers';
 import { TIERS, tierOf } from './tiers';
 import type { RoadFeature } from './types';
-import { fetchRoadTile, tileAt, tileBbox, tileKey, type TileCoord } from './roadtiles';
+import { fetchRoadTile, MAX_DATA_ZOOM } from './roadtiles';
 import { geocodeZip, zipForLocation } from './geocode';
 import { getCachedTile, putCachedTile } from './tilecache';
 import './style.css';
 
 const DEFAULT_ZIP = '98402'; // downtown Tacoma
-
-interface CachedTile {
-  coord: TileCoord;
-  features: RoadFeature[];
-}
-
-// Tiles whose roads are visible on the map.
-const renderedTiles = new Set<string>();
-// Tiles with a fetch in flight (explicit or preload).
-const pendingTiles = new Map<string, TileCoord>();
-// Preloaded tiles: data fetched and held in memory, hidden until clicked.
-const cachedTiles = new Map<string, CachedTile>();
-let byTier: RoadFeature[][] = TIERS.map(() => []);
-// Bumped when the user jumps to a new ZIP so stale in-flight loads get discarded.
-let generation = 0;
-// Unrendered tile currently under the cursor, shown as a click-to-load preview.
-let hoverTile: TileCoord | null = null;
-let hoverKey: string | null = null;
 
 const statusEl = document.getElementById('status')!;
 const placeEl = document.getElementById('place')!;
@@ -65,99 +48,54 @@ function getTooltip({ object }: PickingInfo<RoadFeature>) {
   };
 }
 
-const tilePolygon = (t: TileCoord): [number, number][] => {
-  const [s, w, n, e] = tileBbox(t);
-  return [
-    [w, s],
-    [e, s],
-    [e, n],
-    [w, n],
-  ];
-};
-
-function makeLayers() {
-  const layers: (PathLayer<RoadFeature> | PolygonLayer<TileCoord>)[] = [
-    new PolygonLayer<TileCoord>({
-      id: 'tiles-pending',
-      data: [...pendingTiles.values()],
-      getPolygon: tilePolygon,
-      filled: true,
-      stroked: true,
-      getFillColor: [44, 127, 184, 25],
-      getLineColor: [44, 127, 184, 140],
-      lineWidthMinPixels: 1,
-      pickable: false,
-    }),
-    new PolygonLayer<TileCoord>({
-      id: 'tiles-ready',
-      data: [...cachedTiles.values()].map((c) => c.coord),
-      getPolygon: tilePolygon,
-      filled: false,
-      stroked: true,
-      getLineColor: [255, 255, 255, 25],
-      lineWidthMinPixels: 1,
-      pickable: false,
-    }),
-    new PolygonLayer<TileCoord>({
-      id: 'tile-hover',
-      data: hoverTile ? [hoverTile] : [],
-      getPolygon: tilePolygon,
-      filled: true,
-      stroked: true,
-      getFillColor: [255, 255, 255, 12],
-      getLineColor: [255, 255, 255, 70],
-      lineWidthMinPixels: 1,
-      pickable: false,
-    }),
-  ];
-  TIERS.forEach((tier, i) =>
-    layers.push(
-      new PathLayer<RoadFeature>({
-        id: `roads-tier-${i}`,
-        data: byTier[i],
-        getPath: (f) => f.geometry.coordinates,
-        getColor: tier.color,
-        getWidth: tier.width,
-        widthUnits: 'meters',
-        widthMinPixels: tier.minPixels,
-        capRounded: true,
-        jointRounded: true,
-        pickable: true,
-      })
-    )
-  );
-  return layers;
-}
-
-function rebuild(): void {
-  deck.setProps({ layers: makeLayers() });
-}
-
-/** Add features to the rendered road layers. */
-function renderFeatures(features: RoadFeature[]): void {
-  const added: RoadFeature[][] = TIERS.map(() => []);
-  for (const feature of features) {
-    const tier = tierOf(feature);
-    if (tier !== undefined) added[tier].push(feature);
-  }
-  byTier = byTier.map((arr, i) => (added[i].length > 0 ? arr.concat(added[i]) : arr));
-}
-
-/** Reveal a preloaded tile instantly and prefetch its neighbors. */
-function revealCached(t: TileCoord): void {
-  const key = tileKey(t);
-  const cached = cachedTiles.get(key);
-  if (!cached) return;
-  cachedTiles.delete(key);
-  renderFeatures(cached.features);
-  renderedTiles.add(key);
-  if (hoverKey === key) {
-    hoverKey = null;
-    hoverTile = null;
-  }
-  rebuild();
-  void preloadTiles(neighborsOf([t]));
-}
+/**
+ * Streams whatever tiles the viewport needs, at a zoom-appropriate level of
+ * detail. deck.gl's TileLayer handles visible-tile computation, in-memory
+ * caching, and cancelling requests for tiles the view has moved past; the
+ * OpenMapTiles schema thins the data automatically at low zoom.
+ */
+const roadsLayer = new TileLayer<RoadFeature[]>({
+  id: 'roads',
+  minZoom: 0,
+  maxZoom: MAX_DATA_ZOOM,
+  // 256 biases tile selection one zoom level deeper than the view, so street
+  // detail (minor roads appear at z12) arrives a bit ahead of zooming in.
+  tileSize: 256,
+  maxRequests: 8,
+  getTileData: async ({ index, signal }) => {
+    const key = `${index.z}/${index.x}/${index.y}`;
+    const cached = await getCachedTile(key);
+    if (cached) return cached;
+    const features = await fetchRoadTile(index.x, index.y, index.z, signal ?? undefined);
+    if (!signal?.aborted) putCachedTile(key, features);
+    return features;
+  },
+  renderSubLayers: (props) => {
+    const features = props.data ?? [];
+    const byTier: RoadFeature[][] = TIERS.map(() => []);
+    for (const f of features) {
+      const tier = tierOf(f);
+      if (tier !== undefined) byTier[tier].push(f);
+    }
+    // One PathLayer per tier so higher classes draw on top with their own
+    // minimum pixel widths (keeps the hierarchy readable when zoomed out).
+    return TIERS.map(
+      (tier, i) =>
+        new PathLayer<RoadFeature>({
+          id: `${props.id}-tier-${i}`,
+          data: byTier[i],
+          getPath: (f) => f.geometry.coordinates,
+          getColor: tier.color,
+          getWidth: tier.width,
+          widthUnits: 'meters',
+          widthMinPixels: tier.minPixels,
+          capRounded: true,
+          jointRounded: true,
+          pickable: true,
+        })
+    );
+  },
+});
 
 // Supply a pre-sized canvas instead of letting deck create one. Deck creates
 // its canvas before layout, seeding luma's CanvasContext with the 300×150
@@ -182,175 +120,16 @@ const deck = new Deck({
     bearing: -15,
   },
   controller: { touchRotate: true, inertia: 300 },
-  layers: [],
+  layers: [roadsLayer],
   // Roads are thin; pick anything within a comfortable radius of the pointer
   // so hovering for names doesn't require pixel-perfect aim.
   pickingRadius: 8,
   getTooltip,
-  getCursor: ({ isDragging }) => (isDragging ? 'grabbing' : hoverKey ? 'pointer' : 'grab'),
-  onHover: (info) => {
-    let next: TileCoord | null = null;
-    if (info.coordinate) {
-      const t = tileAt(info.coordinate[0], info.coordinate[1]);
-      const k = tileKey(t);
-      if (!renderedTiles.has(k) && !pendingTiles.has(k)) next = t;
-    }
-    const nextKey = next ? tileKey(next) : null;
-    if (nextKey !== hoverKey) {
-      hoverKey = nextKey;
-      hoverTile = next;
-      rebuild();
-    }
-  },
-  onClick: (info, event) => {
-    // Only plain left clicks load tiles; right/middle clicks are camera
-    // gestures (rotate) and shouldn't trigger loading.
-    if (!event.leftButton || !info.coordinate) return;
-    const t = tileAt(info.coordinate[0], info.coordinate[1]);
-    if (cachedTiles.has(tileKey(t))) {
-      revealCached(t);
-    } else {
-      void loadTiles([t]);
-    }
-  },
 });
 
-const isKnown = (key: string): boolean =>
-  renderedTiles.has(key) || pendingTiles.has(key) || cachedTiles.has(key);
-
-/** Unknown tiles adjacent to (or part of) the given set. */
-function neighborsOf(tiles: TileCoord[]): TileCoord[] {
-  const out = new Map<string, TileCoord>();
-  for (const [tx, ty] of tiles) {
-    for (let dy = -1; dy <= 1; dy++) {
-      for (let dx = -1; dx <= 1; dx++) {
-        const t: TileCoord = [tx + dx, ty + dy];
-        const k = tileKey(t);
-        if (!isKnown(k)) out.set(k, t);
-      }
-    }
-  }
-  return [...out.values()];
-}
-
-/** Partition tiles into local-cache hits (handled via `onHit`) and misses. */
-async function splitByCache(
-  tiles: TileCoord[],
-  gen: number,
-  onHit: (t: TileCoord, features: RoadFeature[]) => void
-): Promise<TileCoord[] | null> {
-  const lookups = await Promise.all(
-    tiles.map(async (t) => ({ t, hit: await getCachedTile(tileKey(t)) }))
-  );
-  if (gen !== generation) return null;
-  const misses: TileCoord[] = [];
-  let anyHit = false;
-  for (const { t, hit } of lookups) {
-    if (isKnown(tileKey(t))) continue; // state may have moved during the await
-    if (hit) {
-      onHit(t, hit);
-      anyHit = true;
-    } else {
-      misses.push(t);
-    }
-  }
-  if (anyHit) rebuild();
-  return misses;
-}
-
-async function loadTiles(tiles: TileCoord[]): Promise<void> {
-  const fresh = tiles.filter((t) => !isKnown(tileKey(t)));
-  if (fresh.length === 0) return;
-  const gen = generation;
-
-  const misses = await splitByCache(fresh, gen, (t, features) => {
-    renderFeatures(features);
-    renderedTiles.add(tileKey(t));
-  });
-  if (misses === null) return; // user jumped to a new ZIP mid-flight
-  if (misses.length === 0) {
-    setStatus(null); // everything came from the local cache
-    void preloadTiles(neighborsOf(fresh));
-    return;
-  }
-
-  misses.forEach((t) => pendingTiles.set(tileKey(t), t));
-  if (hoverKey && pendingTiles.has(hoverKey)) {
-    hoverKey = null;
-    hoverTile = null;
-  }
-  setStatus('Loading roads…');
-  rebuild(); // show the pending-tile overlay immediately
-  let failures = 0;
-  await Promise.all(
-    misses.map(async (t) => {
-      try {
-        const features = await fetchRoadTile(t);
-        if (gen !== generation) return;
-        putCachedTile(tileKey(t), features);
-        renderFeatures(features);
-        renderedTiles.add(tileKey(t));
-      } catch (err) {
-        console.error(err);
-        failures++;
-      } finally {
-        if (gen === generation) {
-          pendingTiles.delete(tileKey(t));
-          rebuild();
-        }
-      }
-    })
-  );
-  if (gen !== generation) return;
-  setStatus(failures > 0 ? 'Some areas failed to load — click them to retry' : null);
-  // Prefetch the surrounding ring (hidden until clicked) so the next click is
-  // instant. Preloads don't cascade: only explicit loads and reveals trigger this.
-  void preloadTiles(neighborsOf(fresh));
-}
-
-async function preloadTiles(tiles: TileCoord[]): Promise<void> {
-  const fresh = tiles.filter((t) => !isKnown(tileKey(t)));
-  if (fresh.length === 0) return;
-  const gen = generation;
-
-  const misses = await splitByCache(fresh, gen, (t, features) => {
-    cachedTiles.set(tileKey(t), { coord: t, features });
-  });
-  if (misses === null || misses.length === 0) return;
-
-  misses.forEach((t) => pendingTiles.set(tileKey(t), t));
-  if (hoverKey && pendingTiles.has(hoverKey)) {
-    hoverKey = null;
-    hoverTile = null;
-  }
-  rebuild();
-  await Promise.all(
-    misses.map(async (t) => {
-      try {
-        const features = await fetchRoadTile(t);
-        if (gen !== generation) return;
-        // Hold the data hidden until clicked, and persist it locally.
-        putCachedTile(tileKey(t), features);
-        cachedTiles.set(tileKey(t), { coord: t, features });
-      } catch (err) {
-        console.warn('Preload failed:', err);
-      } finally {
-        if (gen === generation) {
-          pendingTiles.delete(tileKey(t));
-          rebuild();
-        }
-      }
-    })
-  );
-}
-
-function tilesAround(lng: number, lat: number): TileCoord[] {
-  const [cx, cy] = tileAt(lng, lat);
-  const tiles: TileCoord[] = [];
-  for (let dy = -1; dy <= 1; dy++) {
-    for (let dx = -1; dx <= 1; dx++) tiles.push([cx + dx, cy + dy]);
-  }
-  return tiles;
+// Debug handle for console diagnostics during development.
+if (import.meta.env.DEV) {
+  (window as unknown as { __deck: Deck }).__deck = deck;
 }
 
 async function goToZip(zip: string): Promise<void> {
@@ -369,13 +148,8 @@ async function goToZip(zip: string): Promise<void> {
   }
 
   placeEl.textContent = location.label;
-  generation++;
-  renderedTiles.clear();
-  pendingTiles.clear();
-  cachedTiles.clear();
-  byTier = TIERS.map(() => []);
+  setStatus(null);
   deck.setProps({
-    layers: makeLayers(),
     initialViewState: {
       longitude: location.longitude,
       latitude: location.latitude,
@@ -386,7 +160,6 @@ async function goToZip(zip: string): Promise<void> {
       transitionInterpolator: new FlyToInterpolator(),
     },
   });
-  await loadTiles(tilesAround(location.longitude, location.latitude));
 }
 
 buildLegend();

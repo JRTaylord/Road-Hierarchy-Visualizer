@@ -33,27 +33,22 @@ Tacoma (98402).
 **Controls:**
 
 - Enter a 5-digit ZIP code and hit Go to fly anywhere in the US.
-- Hover beyond the loaded roads to preview the tile a click would load (highlighted
-  rectangle, pointer cursor); click to load it.
+- Roads stream in automatically as you pan and zoom.
 - Drag to pan · right-drag (or Ctrl+drag) to tilt/rotate · scroll to zoom.
 - Hover a road for its name and class.
 
 ## How loading works
 
-The app's clickable grid is standard web-mercator z13 tiles; each one is backed by its
-four z14 OpenFreeMap data tiles, decoded in the browser with `@mapbox/vector-tile`
-(`src/roadtiles.ts`). The tile URL template is discovered from TileJSON at runtime
-because it contains a dated snapshot path.
-
-Entering a ZIP geocodes it to a centroid and loads the 3×3 tiles around it. Clicking an
-unloaded area loads just the tile under the click. After any explicit load or reveal,
-the ring of unknown neighboring tiles is prefetched in the background — but kept hidden
-in memory until clicked, so the map only grows where the user asks it to.
-Preloaded-and-ready tiles show a faint outline and reveal instantly on click; tiles
-currently being fetched show as translucent blue rectangles. Jumping to a new ZIP
-clears the map and discards any in-flight loads. Every fetched tile also persists in
-IndexedDB for 30 days (`src/tilecache.ts`), so revisited areas load with no network at
-all.
+deck.gl's `TileLayer` streams whatever tiles the viewport needs, at a zoom-appropriate
+level of detail: it computes visible tiles, caches them in memory, and cancels requests
+the view has moved past. Tiles are OpenFreeMap protobufs decoded in the browser with
+`@mapbox/vector-tile` (`src/roadtiles.ts`); the tile URL template is discovered from
+TileJSON at runtime because it contains a dated snapshot path. Level of detail comes
+free from the OpenMapTiles schema — low-zoom tiles only contain major road classes
+(motorways from ~z6, primaries from ~z7, minor roads from z12), so zoomed-out views are
+lightweight and street detail appears as you zoom in. Every fetched tile also persists
+in IndexedDB for 30 days (`src/tilecache.ts`), so revisited areas load with no network
+at all.
 
 Road classes map to tiers in `src/tiers.ts` (OpenMapTiles `transportation` classes:
 minor → local streets, tertiary → collectors, secondary → minor arterials, primary →
