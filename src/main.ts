@@ -3,7 +3,7 @@ import { PathLayer, PolygonLayer } from '@deck.gl/layers';
 import { TIERS, tierOf } from './tiers';
 import type { RoadFeature } from './types';
 import { fetchRoadTile, tileAt, tileBbox, tileKey, type TileCoord } from './roadtiles';
-import { geocodeZip } from './geocode';
+import { geocodeZip, zipForLocation } from './geocode';
 import { getCachedTile, putCachedTile } from './tilecache';
 import './style.css';
 
@@ -395,4 +395,37 @@ form.addEventListener('submit', (e) => {
   }
 });
 
-void goToZip(DEFAULT_ZIP);
+/** Browser position, or null if unsupported, denied, or slow to answer. */
+function currentPosition(): Promise<GeolocationCoordinates | null> {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) {
+      resolve(null);
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve(pos.coords),
+      () => resolve(null),
+      { timeout: 8_000, maximumAge: 600_000 }
+    );
+  });
+}
+
+/** Starting ZIP from the browser's location when permitted, else the default. */
+async function startingZip(): Promise<string> {
+  setStatus('Locating you…');
+  const coords = await currentPosition();
+  if (!coords) return DEFAULT_ZIP;
+  try {
+    const zip = await zipForLocation(coords.latitude, coords.longitude);
+    if (zip) return zip;
+  } catch (err) {
+    console.warn('Reverse geocoding failed:', err);
+  }
+  return DEFAULT_ZIP;
+}
+
+void (async () => {
+  const zip = await startingZip();
+  input.value = zip;
+  await goToZip(zip);
+})();

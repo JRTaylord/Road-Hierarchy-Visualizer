@@ -18,7 +18,11 @@ npm install
 npm run dev
 ```
 
-Opens at http://localhost:5173, centered on downtown Tacoma (98402) by default.
+Opens at http://localhost:5173. On startup the app asks for browser geolocation; if
+granted, your coordinates are reverse-geocoded to a starting ZIP (via BigDataCloud's
+free client API — your coordinates are sent only there, only for this lookup). If
+permission is denied, times out, or you're outside the US, it falls back to downtown
+Tacoma (98402).
 
 **Controls:**
 
