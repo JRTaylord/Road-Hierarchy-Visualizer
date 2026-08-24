@@ -113,30 +113,30 @@ deckCanvas.height = Math.max(1, Math.round(deckCanvas.clientHeight * window.devi
 // opening over the canvas when the right button is released.
 deckCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
-const deck = new Deck({
-  canvas: deckCanvas,
-  initialViewState: {
-    longitude: -122.4443,
-    latitude: 47.2529,
-    zoom: 11.5,
-    pitch: 50,
-    bearing: -15,
-    // Camera floor: view zoom 3 maps to z4 data tiles, the lowest zoom with
-    // any road content.
-    minZoom: 3,
-    maxZoom: 17,
-  },
-  controller: { touchRotate: true, inertia: 300 },
-  layers: [roadsLayer],
-  // Roads are thin; pick anything within a comfortable radius of the pointer
-  // so hovering for names doesn't require pixel-perfect aim.
-  pickingRadius: 8,
-  getTooltip,
-});
+// Camera floor: view zoom 3 maps to z4 data tiles, the lowest zoom with any
+// road content. Ceiling caps diving past the z14 max-detail data.
+const VIEW_DEFAULTS = { zoom: 11.5, pitch: 50, bearing: -15, minZoom: 3, maxZoom: 17 };
 
-// Debug handle for console diagnostics during development.
-if (import.meta.env.DEV) {
-  (window as unknown as { __deck: Deck }).__deck = deck;
+// The map is created only once the starting location is known, so the first
+// view a user sees is their own area rather than a default it pans away from.
+let deck: Deck | null = null;
+
+function createDeck(longitude: number, latitude: number): Deck {
+  const instance = new Deck({
+    canvas: deckCanvas,
+    initialViewState: { longitude, latitude, ...VIEW_DEFAULTS },
+    controller: { touchRotate: true, inertia: 300 },
+    layers: [roadsLayer],
+    // Roads are thin; pick anything within a comfortable radius of the
+    // pointer so hovering for names doesn't require pixel-perfect aim.
+    pickingRadius: 8,
+    getTooltip,
+  });
+  if (import.meta.env.DEV) {
+    // Debug handle for console diagnostics during development.
+    (window as unknown as { __deck: Deck }).__deck = instance;
+  }
+  return instance;
 }
 
 async function goToZip(zip: string): Promise<void> {
@@ -156,19 +156,20 @@ async function goToZip(zip: string): Promise<void> {
 
   placeEl.textContent = location.label;
   setStatus(null);
-  deck.setProps({
-    initialViewState: {
-      longitude: location.longitude,
-      latitude: location.latitude,
-      zoom: 11.5,
-      pitch: 50,
-      bearing: -15,
-      minZoom: 3,
-      maxZoom: 17,
-      transitionDuration: 1200,
-      transitionInterpolator: new FlyToInterpolator(),
-    },
-  });
+  if (!deck) {
+    // First location: start the map right here, no pan-over from a default.
+    deck = createDeck(location.longitude, location.latitude);
+  } else {
+    deck.setProps({
+      initialViewState: {
+        longitude: location.longitude,
+        latitude: location.latitude,
+        ...VIEW_DEFAULTS,
+        transitionDuration: 1200,
+        transitionInterpolator: new FlyToInterpolator(),
+      },
+    });
+  }
 }
 
 buildLegend();
@@ -218,4 +219,8 @@ void (async () => {
   const zip = await startingZip();
   input.value = zip;
   await goToZip(zip);
+  if (!deck) {
+    // ZIP lookup failed entirely; show the default area rather than nothing.
+    deck = createDeck(-122.4443, 47.2529);
+  }
 })();
