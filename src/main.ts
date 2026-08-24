@@ -202,8 +202,10 @@ const deck = new Deck({
       rebuild();
     }
   },
-  onClick: (info) => {
-    if (!info.coordinate) return;
+  onClick: (info, event) => {
+    // Only plain left clicks load tiles; right/middle clicks are camera
+    // gestures (rotate) and shouldn't trigger loading.
+    if (!event.leftButton || !info.coordinate) return;
     const t = tileAt(info.coordinate[0], info.coordinate[1]);
     if (cachedTiles.has(tileKey(t))) {
       revealCached(t);
