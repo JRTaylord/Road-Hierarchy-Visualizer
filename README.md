@@ -13,7 +13,8 @@ geocoded with the free [Zippopotam](https://api.zippopotam.us) API.
 
 **Live:** https://jrtaylord.github.io/Road-Hierarchy-Visualizer/ — deployed to GitHub
 Pages by `.github/workflows/deploy.yml` on every push to master. Visitor counts are
-tracked with [GoatCounter](https://tacoma-streets.goatcounter.com) (privacy-friendly,
+tracked with [GoatCounter](https://road-hierarchy-visualizer.goatcounter.com)
+(privacy-friendly,
 no cookies; localhost visits aren't counted).
 
 ## Running
