@@ -2,7 +2,15 @@ import { Deck, FlyToInterpolator, type PickingInfo } from '@deck.gl/core';
 import { PathLayer, PolygonLayer } from '@deck.gl/layers';
 import { TIERS, tierOf } from './tiers';
 import type { RoadFeature } from './types';
-import { fetchRoadTiles, geocodeZip, tileAt, tileBbox, tileKey, type TileCoord } from './overpass';
+import {
+  fetchRoadTiles,
+  geocodeZip,
+  overpassPausedMs,
+  tileAt,
+  tileBbox,
+  tileKey,
+  type TileCoord,
+} from './overpass';
 import { getCachedTile, putCachedTile } from './tilecache';
 import './style.css';
 
@@ -295,7 +303,14 @@ async function loadTiles(tiles: TileCoord[]): Promise<void> {
     void preloadTiles(neighborsOf(fresh));
   } catch (err) {
     console.error(err);
-    if (gen === generation) setStatus('Failed to load roads — click again to retry');
+    if (gen === generation) {
+      const pauseLeft = overpassPausedMs();
+      setStatus(
+        pauseLeft > 0
+          ? `Map servers are overloaded — waiting ${Math.ceil(pauseLeft / 1000)}s before trying again`
+          : 'Failed to load roads — click again to retry'
+      );
+    }
   } finally {
     if (gen === generation) misses.forEach((t) => pendingTiles.delete(tileKey(t)));
     rebuild();

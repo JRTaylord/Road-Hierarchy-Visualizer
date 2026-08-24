@@ -14,6 +14,17 @@ const ENDPOINTS = [
 // requests (including parallel prefetch chunks) start from the healthy one.
 let preferredEndpoint = 0;
 
+// Circuit breaker: when a request exhausts every endpoint, pause all Overpass
+// traffic for a cool-down. Retrying into an outage aggravates it — sustained
+// rapid retries are exactly what earns an IP-level block.
+const COOLDOWN_MS = 2 * 60 * 1000;
+let pausedUntil = 0;
+
+/** Milliseconds until Overpass requests are allowed again (0 = not paused). */
+export function overpassPausedMs(): number {
+  return Math.max(0, pausedUntil - Date.now());
+}
+
 /** Tile size in degrees. Tiles are aligned to a fixed global grid so the same
  * area always maps to the same tile regardless of where loading started. */
 export const TILE_SIZE = 0.05;
@@ -62,6 +73,11 @@ ${tiles.map((t) => `  way["highway"~"${HIGHWAY_FILTER}"](${tileBbox(t).join(',')
 );
 out geom qt;`;
 
+  const pauseLeft = overpassPausedMs();
+  if (pauseLeft > 0) {
+    throw new Error(`Overpass requests paused for ${Math.ceil(pauseLeft / 1000)}s after repeated failures`);
+  }
+
   const start = (preferredEndpoint + endpointOffset) % ENDPOINTS.length;
   const rotated = [...ENDPOINTS.slice(start), ...ENDPOINTS.slice(0, start)];
   let lastError: unknown;
@@ -93,6 +109,7 @@ out geom qt;`;
         });
       }
       preferredEndpoint = ENDPOINTS.indexOf(endpoint);
+      pausedUntil = 0;
       return ways;
     } catch (err) {
       lastError = err;
@@ -102,6 +119,7 @@ out geom qt;`;
       await new Promise((resolve) => setTimeout(resolve, 2000));
     }
   }
+  pausedUntil = Date.now() + COOLDOWN_MS;
   throw lastError;
 }
 
