@@ -180,6 +180,9 @@ const deck = new Deck({
   },
   controller: { touchRotate: true, inertia: 300 },
   layers: [],
+  // Roads are thin; pick anything within a comfortable radius of the pointer
+  // so hovering for names doesn't require pixel-perfect aim.
+  pickingRadius: 8,
   getTooltip,
   getCursor: ({ isDragging }) => (isDragging ? 'grabbing' : hoverKey ? 'pointer' : 'grab'),
   onHover: (info) => {
