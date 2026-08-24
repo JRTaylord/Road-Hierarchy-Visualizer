@@ -35,12 +35,14 @@ function buildLegend(): void {
 
 // Binary-data layers pick by index, not object; the picked path's name lives
 // in the names array carried on the sublayer's data, and its tier is encoded
-// in the sublayer id.
-function getTooltip({ layer, index }: PickingInfo) {
-  if (!layer || index < 0) return null;
-  const tierMatch = /-tier-(\d+)$/.exec(layer.id);
+// in the sublayer id. For picks inside a composite layer, `layer` is the
+// root TileLayer — the PathLayer that was actually hit is `sourceLayer`.
+function getTooltip({ sourceLayer, layer, index }: PickingInfo) {
+  const picked = sourceLayer ?? layer;
+  if (!picked || index < 0) return null;
+  const tierMatch = /-tier-(\d+)$/.exec(picked.id);
   if (!tierMatch) return null;
-  const data = layer.props.data as { names?: (string | null)[] };
+  const data = picked.props.data as { names?: (string | null)[] };
   const name = data.names?.[index] ?? null;
   return {
     html: `<b>${name ?? 'unnamed'}</b><br/>${TIERS[Number(tierMatch[1])].label}`,
