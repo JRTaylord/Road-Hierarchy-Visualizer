@@ -11,6 +11,11 @@ comes from [OpenFreeMap](https://openfreemap.org) vector tiles (OpenMapTiles sch
 sourced from OpenStreetMap) — free, keyless, CDN-backed, no rate limits. ZIP codes are
 geocoded with the free [Zippopotam](https://api.zippopotam.us) API.
 
+**Live:** https://jrtaylord.github.io/Road-Hierarchy-Visualizer/ — deployed to GitHub
+Pages by `.github/workflows/deploy.yml` on every push to master. Visitor counts are
+tracked with [GoatCounter](https://tacoma-streets.goatcounter.com) (privacy-friendly,
+no cookies; localhost visits aren't counted).
+
 ## Running
 
 ```sh
