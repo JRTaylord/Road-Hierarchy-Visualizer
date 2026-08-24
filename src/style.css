@@ -1,0 +1,127 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #0b0e17;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+}
+
+#app {
+  position: absolute;
+  inset: 0;
+}
+
+#legend {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  z-index: 10;
+  padding: 14px 16px;
+  background: rgba(17, 21, 34, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  color: #e8eaf0;
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+  max-width: 260px;
+}
+
+#legend h1 {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 10px;
+  letter-spacing: 0.02em;
+}
+
+#zip-form {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+  pointer-events: auto;
+}
+
+#zip-form input {
+  width: 90px;
+  padding: 5px 8px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  color: #e8eaf0;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+#zip-form input:focus {
+  outline: none;
+  border-color: #2c7fb8;
+}
+
+#zip-form button {
+  padding: 5px 12px;
+  background: #2c7fb8;
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+#zip-form button:hover {
+  background: #3a8fc7;
+}
+
+#place {
+  font-size: 12px;
+  color: #9aa3b5;
+  margin-bottom: 8px;
+  min-height: 14px;
+}
+
+#legend-rows {
+  list-style: none;
+}
+
+#legend-rows li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  padding: 3px 0;
+  color: #c7ccd8;
+}
+
+#legend-rows .swatch {
+  width: 18px;
+  height: 4px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+#legend .hint {
+  margin-top: 10px;
+  font-size: 11px;
+  color: #7c8497;
+}
+
+#status {
+  position: absolute;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 16px;
+  background: rgba(17, 21, 34, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: #c7ccd8;
+  font-size: 13px;
+  z-index: 10;
+  pointer-events: none;
+}
