@@ -1,4 +1,4 @@
-import type { RoadFeature } from './types';
+import type { RoadTile } from './types';
 import type { TileWorkRequest, TileWorkResponse } from './tileworker';
 
 /**
@@ -29,8 +29,19 @@ export interface TileIndex {
 const MAX_CONCURRENT = 16;
 /** Resolved tiles kept in memory before the oldest are dropped. */
 const MAX_RESOLVED = 512;
-/** Finished tiles handed to deck.gl per animation frame. */
-const DELIVER_PER_FRAME = 2;
+/**
+ * Per-frame delivery time budget. The measurable cost of a delivery is the
+ * promise-reaction work that runs in the microtask flush right after the
+ * resolves (TileLayer content assignment and update bookkeeping); deck's
+ * actual GPU upload happens later in its own render pass and can't be
+ * observed from here, so the batch size adapts to what we *can* measure and
+ * the budget is kept conservative to leave frame headroom for the rest.
+ */
+const FRAME_BUDGET_MS = 4;
+const MIN_BATCH = 1;
+const MAX_BATCH = 16;
+/** Tiles delivered per drain; adapts to the measured cost of recent drains. */
+let deliverBatch = 4;
 
 const VISIBLE = 0;
 const SPECULATIVE = 1;
@@ -41,16 +52,16 @@ interface Job {
   index: TileIndex;
   priority: number;
   state: 'queued' | 'loading' | 'ready' | 'done';
-  features: RoadFeature[] | null;
-  promise: Promise<RoadFeature[]>;
-  resolve: (features: RoadFeature[]) => void;
+  tile: RoadTile | null;
+  promise: Promise<RoadTile>;
+  resolve: (tile: RoadTile) => void;
   reject: (err: unknown) => void;
 }
 
 /** One pending hand-off to a consumer awaiting a tile's features. */
 interface Delivery {
   job: Job;
-  resolve: (features: RoadFeature[]) => void;
+  resolve: (tile: RoadTile) => void;
 }
 
 const jobs = new Map<string, Job>();
@@ -72,6 +83,7 @@ if (import.meta.env.DEV) {
       ready: ready.length,
       loading,
       drainScheduled,
+      deliverBatch,
       byState: [...jobs.values()].reduce<Record<string, number>>((acc, j) => {
         acc[j.state] = (acc[j.state] ?? 0) + 1;
         return acc;
@@ -93,7 +105,7 @@ worker.onmessage = (e: MessageEvent<TileWorkResponse>) => {
     job.reject(new Error(e.data.error));
   } else {
     job.state = 'ready';
-    job.features = e.data.features;
+    job.tile = e.data.tile;
     ready.push({ job, resolve: job.resolve });
     scheduleDrain();
   }
@@ -113,9 +125,9 @@ worker.onerror = (e: ErrorEvent) => {
 };
 
 function enqueue(index: TileIndex, key: string, priority: number): Job {
-  let resolve!: (features: RoadFeature[]) => void;
+  let resolve!: (tile: RoadTile) => void;
   let reject!: (err: unknown) => void;
-  const promise = new Promise<RoadFeature[]>((res, rej) => {
+  const promise = new Promise<RoadTile>((res, rej) => {
     resolve = res;
     reject = rej;
   });
@@ -128,7 +140,7 @@ function enqueue(index: TileIndex, key: string, priority: number): Job {
     index,
     priority,
     state: 'queued',
-    features: null,
+    tile: null,
     promise,
     resolve,
     reject,
@@ -184,11 +196,23 @@ function drain(): void {
   // Visible tiles first: a promoted tile un-blanks the map; a speculative
   // one just warms the cache.
   ready.sort((a, b) => a.job.priority - b.job.priority);
-  const batch = ready.splice(0, DELIVER_PER_FRAME);
+  const batch = ready.splice(0, deliverBatch);
+  const start = performance.now();
   for (const { job, resolve } of batch) {
     job.state = 'done';
-    resolve(job.features!);
+    resolve(job.tile!);
   }
+  // The resolves' promise reactions run before this microtask, so `cost`
+  // includes them. Halve the batch when over budget, creep up when well
+  // under — an AIMD controller that converges near the frame budget.
+  queueMicrotask(() => {
+    const cost = performance.now() - start;
+    if (cost > FRAME_BUDGET_MS) {
+      deliverBatch = Math.max(MIN_BATCH, Math.floor(deliverBatch / 2));
+    } else if (cost < FRAME_BUDGET_MS / 2 && deliverBatch < MAX_BATCH) {
+      deliverBatch += 1;
+    }
+  });
   trimResolved();
   scheduleDrain();
 }
@@ -202,10 +226,10 @@ function trimResolved(): void {
 }
 
 /** Load a tile the viewport needs now. Promotes a queued speculative load. */
-export function requestTile(index: TileIndex, signal?: AbortSignal | null): Promise<RoadFeature[]> {
+export function requestTile(index: TileIndex, signal?: AbortSignal | null): Promise<RoadTile> {
   const key = tileKey(index);
   let job = jobs.get(key);
-  let promise: Promise<RoadFeature[]>;
+  let promise: Promise<RoadTile>;
   if (job) {
     // Promotion matters both in the load queue and the delivery queue.
     if (job.state !== 'done') {

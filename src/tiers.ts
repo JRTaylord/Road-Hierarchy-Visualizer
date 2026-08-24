@@ -1,5 +1,3 @@
-import type { RoadFeature } from './types';
-
 export interface Tier {
   label: string;
   /** OpenMapTiles transportation classes belonging to this tier. */
@@ -55,9 +53,4 @@ TIERS.forEach((tier, i) => tier.classes.forEach((c) => classToTier.set(c, i)));
 /** Tier index for a transportation class, or undefined if not visualized. */
 export function tierOfClass(cls: string): number | undefined {
   return classToTier.get(cls);
-}
-
-/** Tier index for a road feature, or undefined if its class isn't visualized. */
-export function tierOf(feature: RoadFeature): number | undefined {
-  return classToTier.get(feature.properties.class);
 }
