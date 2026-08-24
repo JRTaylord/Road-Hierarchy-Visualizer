@@ -168,6 +168,9 @@ function revealCached(t: TileCoord): void {
 const deckCanvas = document.getElementById('deck-canvas') as HTMLCanvasElement;
 deckCanvas.width = Math.max(1, Math.round(deckCanvas.clientWidth * window.devicePixelRatio));
 deckCanvas.height = Math.max(1, Math.round(deckCanvas.clientHeight * window.devicePixelRatio));
+// Right-drag rotates the camera; keep the browser's context menu from
+// opening over the canvas when the right button is released.
+deckCanvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
 const deck = new Deck({
   canvas: deckCanvas,
