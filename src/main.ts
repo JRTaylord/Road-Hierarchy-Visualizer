@@ -68,7 +68,7 @@ const roadsLayer = new TileLayer<RoadFeature[]>({
   // 0 disables deck's own request throttling; the tile store schedules all
   // loads itself, prioritizing visible tiles over speculative prefetches.
   maxRequests: 0,
-  getTileData: ({ index }) => requestTile(index),
+  getTileData: ({ index, signal }) => requestTile(index, signal),
   renderSubLayers: (props) => {
     const features = props.data ?? [];
     const byTier: RoadFeature[][] = TIERS.map(() => []);

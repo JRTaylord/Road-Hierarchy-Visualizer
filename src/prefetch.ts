@@ -32,6 +32,14 @@ const MIN_INTERVAL_MS = 120;
 const MAX_SPAN = 16;
 /** Web-mercator latitude limit. */
 const MAX_LAT = 85.051129;
+/** Velocity is averaged over this window, not a single (noisy) frame pair. */
+const HISTORY_MS = 160;
+/** Shortest window that gives a meaningful velocity estimate. */
+const MIN_VELOCITY_SPAN_MS = 40;
+/** Furthest the zoom prediction may reach beyond the current zoom, in levels.
+ * Uncapped, a fast wheel spin extrapolated to multi-level overshoot, queueing
+ * heavy tiles for zoom levels the camera never stops at. */
+const MAX_ZOOM_LOOKAHEAD = 1;
 
 interface Snapshot {
   longitude: number;
@@ -44,7 +52,7 @@ interface Candidate extends TileIndex {
   d: number;
 }
 
-let last: Snapshot | null = null;
+const history: Snapshot[] = [];
 let lastRun = 0;
 let trailing: ReturnType<typeof setTimeout> | null = null;
 
@@ -108,21 +116,29 @@ function runPrediction(view: PrefetchViewState, width: number, height: number): 
   const now = performance.now();
   lastRun = now;
 
-  // Extrapolate current motion LOOKAHEAD_MS into the future. A stale snapshot
-  // (pause in interaction) means no meaningful velocity — predict in place.
+  // Extrapolate current motion LOOKAHEAD_MS into the future, with velocity
+  // averaged across a short history window. Snapshots older than the window
+  // fall off, so an interaction pause naturally resets to no velocity.
+  while (history.length > 0 && now - history[0].time > HISTORY_MS) history.shift();
+  const oldest = history[0];
   let predLng = view.longitude;
   let predLat = view.latitude;
   let predZoom = view.zoom;
-  if (last) {
-    const dt = now - last.time;
-    if (dt > 0 && dt < 500) {
-      const k = LOOKAHEAD_MS / dt;
-      predLng = view.longitude + (view.longitude - last.longitude) * k;
-      predLat = clamp(view.latitude + (view.latitude - last.latitude) * k, -MAX_LAT, MAX_LAT);
-      predZoom = clamp(view.zoom + (view.zoom - last.zoom) * k, MIN_DATA_ZOOM - 1, MAX_DATA_ZOOM + 3);
+  if (oldest) {
+    const span = now - oldest.time;
+    if (span >= MIN_VELOCITY_SPAN_MS) {
+      const k = LOOKAHEAD_MS / span;
+      predLng = view.longitude + (view.longitude - oldest.longitude) * k;
+      predLat = clamp(view.latitude + (view.latitude - oldest.latitude) * k, -MAX_LAT, MAX_LAT);
+      const zoomAhead = clamp(
+        (view.zoom - oldest.zoom) * k,
+        -MAX_ZOOM_LOOKAHEAD,
+        MAX_ZOOM_LOOKAHEAD
+      );
+      predZoom = view.zoom + zoomAhead;
     }
   }
-  last = { longitude: view.longitude, latitude: view.latitude, zoom: view.zoom, time: now };
+  history.push({ longitude: view.longitude, latitude: view.latitude, zoom: view.zoom, time: now });
 
   const zNow = dataZoomFor(view.zoom);
   const zPred = dataZoomFor(predZoom);
