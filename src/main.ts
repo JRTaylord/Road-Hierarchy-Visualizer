@@ -3,9 +3,10 @@ import { PathLayer } from '@deck.gl/layers';
 import { TileLayer } from '@deck.gl/geo-layers';
 import { TIERS, tierOf } from './tiers';
 import type { RoadFeature } from './types';
-import { fetchRoadTile, MAX_DATA_ZOOM } from './roadtiles';
+import { MAX_DATA_ZOOM } from './roadtiles';
 import { geocodeZip, zipForLocation } from './geocode';
-import { getCachedTile, putCachedTile } from './tilecache';
+import { requestTile } from './tilestore';
+import { schedulePrefetch } from './prefetch';
 import './style.css';
 
 const DEFAULT_ZIP = '98402'; // downtown Tacoma
@@ -64,15 +65,10 @@ const roadsLayer = new TileLayer<RoadFeature[]>({
   // 256 biases tile selection one zoom level deeper than the view, so street
   // detail (minor roads appear at z12) arrives a bit ahead of zooming in.
   tileSize: 256,
-  maxRequests: 8,
-  getTileData: async ({ index, signal }) => {
-    const key = `${index.z}/${index.x}/${index.y}`;
-    const cached = await getCachedTile(key);
-    if (cached) return cached;
-    const features = await fetchRoadTile(index.x, index.y, index.z, signal ?? undefined);
-    if (!signal?.aborted) putCachedTile(key, features);
-    return features;
-  },
+  // 0 disables deck's own request throttling; the tile store schedules all
+  // loads itself, prioritizing visible tiles over speculative prefetches.
+  maxRequests: 0,
+  getTileData: ({ index, signal }) => requestTile(index, signal),
   renderSubLayers: (props) => {
     const features = props.data ?? [];
     const byTier: RoadFeature[][] = TIERS.map(() => []);
@@ -122,11 +118,21 @@ const VIEW_DEFAULTS = { zoom: 11.5, pitch: 50, bearing: -15, minZoom: 3, maxZoom
 let deck: Deck | null = null;
 
 function createDeck(longitude: number, latitude: number): Deck {
+  const initialViewState = { longitude, latitude, ...VIEW_DEFAULTS };
   const instance = new Deck({
     canvas: deckCanvas,
-    initialViewState: { longitude, latitude, ...VIEW_DEFAULTS },
+    initialViewState,
     controller: { touchRotate: true, inertia: 300 },
     layers: [roadsLayer],
+    // Every camera move (including inertia and fly-to transitions) feeds the
+    // predictor, which warms tiles just outside and ahead of the view.
+    onViewStateChange: ({ viewState }) => {
+      schedulePrefetch(
+        viewState as { longitude: number; latitude: number; zoom: number },
+        deckCanvas.clientWidth,
+        deckCanvas.clientHeight
+      );
+    },
     // Roads are thin; pick anything within a comfortable radius of the
     // pointer so hovering for names doesn't require pixel-perfect aim.
     pickingRadius: 8,
@@ -136,6 +142,9 @@ function createDeck(longitude: number, latitude: number): Deck {
     // Debug handle for console diagnostics during development.
     (window as unknown as { __deck: Deck }).__deck = instance;
   }
+  // Seed the ring around the starting view; interaction hasn't happened yet,
+  // so onViewStateChange alone would leave the initial neighborhood cold.
+  schedulePrefetch(initialViewState, deckCanvas.clientWidth, deckCanvas.clientHeight);
   return instance;
 }
 
