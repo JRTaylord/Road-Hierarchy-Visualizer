@@ -22,7 +22,7 @@ export const tileAt = (lng: number, lat: number): TileCoord => [
 ];
 
 /** [south, west, north, east] */
-const tileBbox = ([tx, ty]: TileCoord): [number, number, number, number] => [
+export const tileBbox = ([tx, ty]: TileCoord): [number, number, number, number] => [
   ty * TILE_SIZE,
   tx * TILE_SIZE,
   (ty + 1) * TILE_SIZE,

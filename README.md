@@ -22,7 +22,8 @@ Opens at http://localhost:5173, centered on downtown Tacoma (98402) by default.
 **Controls:**
 
 - Enter a 5-digit ZIP code and hit Go to fly anywhere in the US.
-- Click beyond the loaded roads (the dark void at the map's edges) to load that area.
+- Hover beyond the loaded roads to preview the tile a click would load (highlighted
+  rectangle, pointer cursor); click to load it.
 - Drag to pan · right-drag (or Ctrl+drag) to tilt/rotate · scroll to zoom.
 - Hover a road for its name and class.
 
@@ -30,9 +31,11 @@ Opens at http://localhost:5173, centered on downtown Tacoma (98402) by default.
 
 The map is divided into a fixed global grid of 0.05°-degree tiles (`src/overpass.ts`).
 Entering a ZIP geocodes it to a centroid and loads the 3×3 tiles around it in one
-Overpass request. Clicking an unloaded area loads the tile under the click. Roads are
-deduplicated across tiles by OSM way id, and jumping to a new ZIP clears the map and
-discards any in-flight loads.
+Overpass request. Clicking an unloaded area loads just the tile under the click. After
+any explicit load finishes, the ring of unloaded neighboring tiles is prefetched in the
+background (preloads don't cascade further). Tiles currently being fetched are shown as
+translucent blue rectangles. Roads are deduplicated across tiles by OSM way id, and
+jumping to a new ZIP clears the map and discards any in-flight loads.
 
 ## Tuning
 
