@@ -5,7 +5,7 @@ import { TIERS } from './tiers';
 import type { RoadTile } from './types';
 import { MAX_DATA_ZOOM } from './roadtiles';
 import { geocodeZip, zipForLocation } from './geocode';
-import { requestTile } from './tilestore';
+import { requestTile, getTileWait, tileKey } from './tilestore';
 import { schedulePrefetch } from './prefetch';
 import './style.css';
 
@@ -55,14 +55,47 @@ function getTooltip({ layer, index }: PickingInfo) {
 }
 
 /**
- * Crossfade: a tile fades in over FADE_MS from when its content first
- * renders, instead of popping to full opacity. Fade progress is a function
- * of time only, so each animation frame just needs the TileLayer to re-run
- * renderSubLayers — driven by bumping a counter in updateTriggers while any
- * fade is active. A tile re-shown from deck's tile cache keeps its original
- * fade start and therefore appears instantly.
+ * Crossfade — but only where a fade helps. A tile fades in over FADE_MS
+ * only when it was genuinely late (the view sat waiting for it) AND it
+ * covers ground nothing has rendered before. Refinement swaps at zoom
+ * boundaries (an ancestor or descendant already drew this area) and
+ * prefetched/cached arrivals appear instantly — fading those reads as
+ * flicker, not polish. Fade progress is a function of time only, so each
+ * animation frame just needs the TileLayer to re-run renderSubLayers —
+ * driven by bumping a counter in updateTriggers while any fade is active.
  */
 const FADE_MS = 200;
+/** Arrivals faster than this render instantly; only slower ones fade in. */
+const LATE_ARRIVAL_MS = 80;
+/** Matches the TileLayer's minZoom — no ancestors exist above it. */
+const MIN_TILE_ZOOM = 4;
+
+// Which tile areas have ever been drawn this session. `renderedExact` holds
+// tiles rendered as themselves; `renderedBelow` marks every ancestor of a
+// rendered tile, so a zoomed-out tile knows a descendant already covered it.
+const renderedExact = new Set<string>();
+const renderedBelow = new Set<string>();
+
+function markRendered(x: number, y: number, z: number): void {
+  renderedExact.add(tileKey({ x, y, z }));
+  for (let pz = z - 1; pz >= MIN_TILE_ZOOM; pz--) {
+    x >>= 1;
+    y >>= 1;
+    renderedBelow.add(tileKey({ x, y, z: pz }));
+  }
+}
+
+/** True if this tile's area is already on screen in some form. */
+function coveredBefore(x: number, y: number, z: number): boolean {
+  const key = tileKey({ x, y, z });
+  if (renderedExact.has(key) || renderedBelow.has(key)) return true;
+  for (let pz = z - 1; pz >= MIN_TILE_ZOOM; pz--) {
+    x >>= 1;
+    y >>= 1;
+    if (renderedExact.has(tileKey({ x, y, z: pz }))) return true;
+  }
+  return false;
+}
 
 /** Binary PathLayer data for one tier, built once per tile. */
 interface TierLayerData {
@@ -109,10 +142,9 @@ function ensureFadeLoop(): void {
   requestAnimationFrame(step);
 }
 
-/** Ease-out: rises fast, so the parent→child LoD swap dims only briefly. */
+/** Ease-out fade progress; fadeStart 0 means "never fade" (already 1). */
 function fadeAlpha(tile: FadeableTile): number {
-  tile.fadeStart ??= performance.now();
-  const t = Math.min(1, (performance.now() - tile.fadeStart) / FADE_MS);
+  const t = Math.min(1, (performance.now() - (tile.fadeStart ?? 0)) / FADE_MS);
   return 1 - (1 - t) * (1 - t);
 }
 
@@ -146,7 +178,15 @@ function makeRoadsLayer(): TileLayer<RoadTile> {
     renderSubLayers: (props) => {
       const tiers = props.data;
       if (!tiers) return null;
-      const tile = props.tile as FadeableTile;
+      const tile = props.tile as FadeableTile & { index: { x: number; y: number; z: number } };
+      if (tile.fadeStart === undefined) {
+        const { x, y, z } = tile.index;
+        const late = getTileWait(tileKey(tile.index)) >= LATE_ARRIVAL_MS;
+        // 0 = no fade: either the tile was ready when asked for, or its
+        // area is already drawn and a fade would flicker the swap.
+        tile.fadeStart = late && !coveredBefore(x, y, z) ? performance.now() : 0;
+        markRendered(x, y, z);
+      }
       const opacity = fadeAlpha(tile);
       if (opacity < 1) {
         fadingTiles.add(tile);

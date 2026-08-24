@@ -52,6 +52,8 @@ interface Job {
   index: TileIndex;
   priority: number;
   state: 'queued' | 'loading' | 'ready' | 'done';
+  /** When a visible consumer asked for this tile; unset for pure prefetch. */
+  requestedAt?: number;
   tile: RoadTile | null;
   promise: Promise<RoadTile>;
   resolve: (tile: RoadTile) => void;
@@ -73,6 +75,16 @@ let nextId = 1;
 let drainScheduled = false;
 
 export const tileKey = ({ x, y, z }: TileIndex): string => `${z}/${x}/${y}`;
+
+// How long each delivered tile spent between a visible request and delivery.
+// The renderer uses this to fade in only tiles that arrived noticeably late;
+// prefetched or cached tiles (near-zero wait) appear instantly.
+const tileWaits = new Map<string, number>();
+
+/** Milliseconds the tile's last visible consumer waited for it (0 if unknown). */
+export function getTileWait(key: string): number {
+  return tileWaits.get(key) ?? 0;
+}
 
 if (import.meta.env.DEV) {
   // Debug handle for console diagnostics during development.
@@ -200,6 +212,11 @@ function drain(): void {
   const start = performance.now();
   for (const { job, resolve } of batch) {
     job.state = 'done';
+    if (job.requestedAt !== undefined) {
+      if (tileWaits.size > 4096) tileWaits.clear();
+      tileWaits.set(job.key, start - job.requestedAt);
+      job.requestedAt = undefined;
+    }
     resolve(job.tile!);
   }
   // The resolves' promise reactions run before this microtask, so `cost`
@@ -234,6 +251,7 @@ export function requestTile(index: TileIndex, signal?: AbortSignal | null): Prom
     // Promotion matters both in the load queue and the delivery queue.
     if (job.state !== 'done') {
       job.priority = VISIBLE;
+      job.requestedAt ??= performance.now();
       promise = job.promise;
     } else {
       // Refresh insertion order so trimResolved evicts least-recently-used.
@@ -243,6 +261,8 @@ export function requestTile(index: TileIndex, signal?: AbortSignal | null): Prom
       // cached zoom level in one already-resolved microtask flush would
       // tessellate it all in a single frame — the hitch, back again.
       job.priority = VISIBLE;
+      // This is a fresh ask, not the original one — restart the wait clock.
+      job.requestedAt = performance.now();
       const fixed = job;
       promise = new Promise((resolve) => {
         ready.push({ job: fixed, resolve });
@@ -251,6 +271,7 @@ export function requestTile(index: TileIndex, signal?: AbortSignal | null): Prom
     }
   } else {
     job = enqueue(index, key, VISIBLE);
+    job.requestedAt = performance.now();
     promise = job.promise;
   }
   if (signal) {
