@@ -1,6 +1,7 @@
 export interface RoadProperties {
   name: string | null;
-  highway: string;
+  /** OpenMapTiles transportation class (motorway, trunk, primary, …, minor). */
+  class: string;
 }
 
 export interface RoadFeature {
@@ -10,9 +11,4 @@ export interface RoadFeature {
     coordinates: [number, number][];
   };
   properties: RoadProperties;
-}
-
-export interface RoadCollection {
-  type: 'FeatureCollection';
-  features: RoadFeature[];
 }

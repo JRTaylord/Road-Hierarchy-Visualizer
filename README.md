@@ -6,9 +6,10 @@ draw order — each higher functional class (collectors, minor arterials, princi
 arterials, highways) draws brighter, wider, and on top of the classes below it. The
 camera can tilt and rotate for oblique views.
 
-Built with [deck.gl](https://deck.gl) (no framework) + Vite + TypeScript. Street data is
-fetched at runtime from OpenStreetMap via the Overpass API; ZIP codes are geocoded with
-the free [Zippopotam](https://api.zippopotam.us) API. No API keys required.
+Built with [deck.gl](https://deck.gl) (no framework) + Vite + TypeScript. Street data
+comes from [OpenFreeMap](https://openfreemap.org) vector tiles (OpenMapTiles schema,
+sourced from OpenStreetMap) — free, keyless, CDN-backed, no rate limits. ZIP codes are
+geocoded with the free [Zippopotam](https://api.zippopotam.us) API.
 
 ## Running
 
@@ -29,26 +30,39 @@ Opens at http://localhost:5173, centered on downtown Tacoma (98402) by default.
 
 ## How loading works
 
-The map is divided into a fixed global grid of 0.05°-degree tiles (`src/overpass.ts`).
-Entering a ZIP geocodes it to a centroid and loads the 3×3 tiles around it in one
-Overpass request. Clicking an unloaded area loads just the tile under the click. After
-any explicit load or reveal, the ring of unknown neighboring tiles is prefetched in the
-background — but kept hidden in memory until clicked, so the map only grows where the
-user asks it to. Preloaded-and-ready tiles show a faint outline and reveal instantly on
-click; tiles currently being fetched show as translucent blue rectangles. Roads are
-deduplicated across tiles by OSM way id, and jumping to a new ZIP clears the map and
-discards any in-flight loads.
+The app's clickable grid is standard web-mercator z13 tiles; each one is backed by its
+four z14 OpenFreeMap data tiles, decoded in the browser with `@mapbox/vector-tile`
+(`src/roadtiles.ts`). The tile URL template is discovered from TileJSON at runtime
+because it contains a dated snapshot path.
 
-Fetching is tuned for the public Overpass instances: prefetches run as small chunks in
-parallel across three endpoints (`src/overpass.ts`), requests use quadtile-sorted output
-and a 20 s client timeout so a congested instance fails over quickly, the most recently
-successful endpoint is tried first, and every fetched tile is persisted in IndexedDB for
-30 days (`src/tilecache.ts`) so revisited areas load instantly without touching Overpass
-at all. When all public instances are overloaded (it happens at peak times), the app
-surfaces a retry message — there is no way around that short of self-hosting Overpass.
+Entering a ZIP geocodes it to a centroid and loads the 3×3 tiles around it. Clicking an
+unloaded area loads just the tile under the click. After any explicit load or reveal,
+the ring of unknown neighboring tiles is prefetched in the background — but kept hidden
+in memory until clicked, so the map only grows where the user asks it to.
+Preloaded-and-ready tiles show a faint outline and reveal instantly on click; tiles
+currently being fetched show as translucent blue rectangles. Jumping to a new ZIP
+clears the map and discards any in-flight loads. Every fetched tile also persists in
+IndexedDB for 30 days (`src/tilecache.ts`), so revisited areas load with no network at
+all.
+
+Road classes map to tiers in `src/tiers.ts` (OpenMapTiles `transportation` classes:
+minor → local streets, tertiary → collectors, secondary → minor arterials, primary →
+principal arterials, motorway/trunk → highways; service roads and paths are excluded).
+Street names live in the separate `transportation_name` layer; road features inherit a
+name from any shared vertex with that layer, falling back to the route ref (e.g.
+"WA 16").
+
+## Note on canvas sizing
+
+`index.html` supplies a pre-sized `<canvas>` to Deck rather than letting it create one.
+Deck-created canvases are seeded before layout with the browser's 300×150 default, and
+a luma.gl v9 init race (ResizeObserver delivery vs. async GPU device attach) can leave
+the drawing buffer stuck at that size — blurry rendering and broken hover picking. A
+canvas that is already laid out and buffer-sized starts correct regardless of how that
+race resolves.
 
 ## Tuning
 
-All tier definitions — OSM class mapping, color, line width — live in one constant
-array in `src/tiers.ts`. The legend and rendering both derive from it, so edits there
-stay consistent everywhere. Tile size lives in `src/overpass.ts` (`TILE_SIZE`).
+All tier definitions — class mapping, color, line width — live in one constant array in
+`src/tiers.ts`. The legend and rendering both derive from it, so edits there stay
+consistent everywhere. The app tile zoom and data tile zoom live in `src/roadtiles.ts`.
