@@ -56,7 +56,10 @@ function getTooltip({ object }: PickingInfo<RoadFeature>) {
  */
 const roadsLayer = new TileLayer<RoadFeature[]>({
   id: 'roads',
-  minZoom: 0,
+  // z4 is the lowest zoom where OpenFreeMap tiles contain any roads
+  // (motorways/trunks); below that the layer keeps serving z4 tiles so
+  // zooming way out still shows the highway skeleton instead of nothing.
+  minZoom: 4,
   maxZoom: MAX_DATA_ZOOM,
   // 256 biases tile selection one zoom level deeper than the view, so street
   // detail (minor roads appear at z12) arrives a bit ahead of zooming in.
@@ -118,6 +121,10 @@ const deck = new Deck({
     zoom: 11.5,
     pitch: 50,
     bearing: -15,
+    // Camera floor: view zoom 3 maps to z4 data tiles, the lowest zoom with
+    // any road content.
+    minZoom: 3,
+    maxZoom: 17,
   },
   controller: { touchRotate: true, inertia: 300 },
   layers: [roadsLayer],
@@ -156,6 +163,8 @@ async function goToZip(zip: string): Promise<void> {
       zoom: 11.5,
       pitch: 50,
       bearing: -15,
+      minZoom: 3,
+      maxZoom: 17,
       transitionDuration: 1200,
       transitionInterpolator: new FlyToInterpolator(),
     },
