@@ -1,4 +1,4 @@
-import type { RoadFeature } from './types';
+import type { RoadTile } from './types';
 
 /**
  * Persistent per-tile road cache in IndexedDB. A tile fetched once is served
@@ -6,13 +6,13 @@ import type { RoadFeature } from './types';
  */
 
 const DB_NAME = 'street-hierarchy-explorer';
-const DB_VERSION = 2; // v2: OpenFreeMap features replace Overpass way maps
+const DB_VERSION = 3; // v3: binary tier bundles replace GeoJSON feature arrays
 const STORE = 'tiles';
 const MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 interface TileRecord {
   key: string;
-  features: RoadFeature[];
+  tile: RoadTile;
   fetchedAt: number;
 }
 
@@ -34,7 +34,7 @@ function openDb(): Promise<IDBDatabase | null> {
   return dbPromise;
 }
 
-export async function getCachedTile(key: string): Promise<RoadFeature[] | null> {
+export async function getCachedTile(key: string): Promise<RoadTile | null> {
   const db = await openDb();
   if (!db) return null;
   return new Promise((resolve) => {
@@ -44,17 +44,17 @@ export async function getCachedTile(key: string): Promise<RoadFeature[] | null> 
       if (!record || Date.now() - record.fetchedAt > MAX_AGE_MS) {
         resolve(null);
       } else {
-        resolve(record.features);
+        resolve(record.tile);
       }
     };
     req.onerror = () => resolve(null);
   });
 }
 
-export function putCachedTile(key: string, features: RoadFeature[]): void {
+export function putCachedTile(key: string, tile: RoadTile): void {
   void openDb().then((db) => {
     if (!db) return;
-    const record: TileRecord = { key, features, fetchedAt: Date.now() };
+    const record: TileRecord = { key, tile, fetchedAt: Date.now() };
     // Fire-and-forget; a failed write just means a refetch next visit.
     db.transaction(STORE, 'readwrite').objectStore(STORE).put(record);
   });

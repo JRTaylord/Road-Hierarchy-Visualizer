@@ -1,8 +1,8 @@
 import { VectorTile } from '@mapbox/vector-tile';
 import { PbfReader } from 'pbf';
 import type { Geometry } from 'geojson';
-import { tierOfClass } from './tiers';
-import type { RoadFeature } from './types';
+import { TIERS, tierOfClass } from './tiers';
+import type { RoadTile } from './types';
 
 /**
  * Road data from OpenFreeMap vector tiles (OpenMapTiles schema) — a free,
@@ -50,10 +50,25 @@ function linesOf(geometry: Geometry): LineCoords[] {
   return [];
 }
 
-function decodeRoads(buf: ArrayBuffer, x: number, y: number, z: number): RoadFeature[] {
+/** Growable per-tier accumulator, converted to typed arrays once complete. */
+interface TierBuilder {
+  coords: number[];
+  starts: number[];
+  names: (string | null)[];
+  vertexCount: number;
+}
+
+const emptyTile = (): RoadTile =>
+  TIERS.map(() => ({
+    startIndices: new Uint32Array(0),
+    positions: new Float64Array(0),
+    names: [],
+  }));
+
+function decodeRoads(buf: ArrayBuffer, x: number, y: number, z: number): RoadTile {
   const tile = new VectorTile(new PbfReader(buf));
   const roads = tile.layers['transportation'];
-  if (!roads) return [];
+  if (!roads) return emptyTile();
 
   // The transportation layer carries no names; index the vertices of the
   // transportation_name layer and let road features inherit a label from any
@@ -76,11 +91,19 @@ function decodeRoads(buf: ArrayBuffer, x: number, y: number, z: number): RoadFea
     }
   }
 
-  const out: RoadFeature[] = [];
+  const builders: TierBuilder[] = TIERS.map(() => ({
+    coords: [],
+    starts: [],
+    names: [],
+    vertexCount: 0,
+  }));
   for (let i = 0; i < roads.length; i++) {
     const f = roads.feature(i);
     const cls = f.properties['class'];
-    if (typeof cls !== 'string' || tierOfClass(cls) === undefined) continue;
+    if (typeof cls !== 'string') continue;
+    const tier = tierOfClass(cls);
+    if (tier === undefined) continue;
+    const b = builders[tier];
     for (const line of linesOf(f.toGeoJSON(x, y, z).geometry)) {
       if (line.length < 2) continue;
       let name: string | null = null;
@@ -91,14 +114,17 @@ function decodeRoads(buf: ArrayBuffer, x: number, y: number, z: number): RoadFea
           break;
         }
       }
-      out.push({
-        type: 'Feature',
-        geometry: { type: 'LineString', coordinates: line },
-        properties: { name, class: cls },
-      });
+      b.starts.push(b.vertexCount);
+      for (const [lng, lat] of line) b.coords.push(lng, lat);
+      b.vertexCount += line.length;
+      b.names.push(name);
     }
   }
-  return out;
+  return builders.map((b) => ({
+    startIndices: new Uint32Array(b.starts),
+    positions: new Float64Array(b.coords),
+    names: b.names,
+  }));
 }
 
 /** Fetch and decode one OpenFreeMap tile's roads at any zoom. */
@@ -107,7 +133,7 @@ export async function fetchRoadTile(
   y: number,
   z: number,
   signal?: AbortSignal
-): Promise<RoadFeature[]> {
+): Promise<RoadTile> {
   const template = await tileUrlTemplate();
   const url = template
     .replace('{z}', String(z))

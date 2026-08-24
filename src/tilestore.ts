@@ -1,4 +1,4 @@
-import type { RoadFeature } from './types';
+import type { RoadTile } from './types';
 import type { TileWorkRequest, TileWorkResponse } from './tileworker';
 
 /**
@@ -29,8 +29,19 @@ export interface TileIndex {
 const MAX_CONCURRENT = 16;
 /** Resolved tiles kept in memory before the oldest are dropped. */
 const MAX_RESOLVED = 512;
-/** Finished tiles handed to deck.gl per animation frame. */
-const DELIVER_PER_FRAME = 2;
+/**
+ * Per-frame delivery time budget. The measurable cost of a delivery is the
+ * promise-reaction work that runs in the microtask flush right after the
+ * resolves (TileLayer content assignment and update bookkeeping); deck's
+ * actual GPU upload happens later in its own render pass and can't be
+ * observed from here, so the batch size adapts to what we *can* measure and
+ * the budget is kept conservative to leave frame headroom for the rest.
+ */
+const FRAME_BUDGET_MS = 4;
+const MIN_BATCH = 1;
+const MAX_BATCH = 16;
+/** Tiles delivered per drain; adapts to the measured cost of recent drains. */
+let deliverBatch = 4;
 
 const VISIBLE = 0;
 const SPECULATIVE = 1;
@@ -41,16 +52,18 @@ interface Job {
   index: TileIndex;
   priority: number;
   state: 'queued' | 'loading' | 'ready' | 'done';
-  features: RoadFeature[] | null;
-  promise: Promise<RoadFeature[]>;
-  resolve: (features: RoadFeature[]) => void;
+  /** When a visible consumer asked for this tile; unset for pure prefetch. */
+  requestedAt?: number;
+  tile: RoadTile | null;
+  promise: Promise<RoadTile>;
+  resolve: (tile: RoadTile) => void;
   reject: (err: unknown) => void;
 }
 
 /** One pending hand-off to a consumer awaiting a tile's features. */
 interface Delivery {
   job: Job;
-  resolve: (features: RoadFeature[]) => void;
+  resolve: (tile: RoadTile) => void;
 }
 
 const jobs = new Map<string, Job>();
@@ -63,6 +76,16 @@ let drainScheduled = false;
 
 export const tileKey = ({ x, y, z }: TileIndex): string => `${z}/${x}/${y}`;
 
+// How long each delivered tile spent between a visible request and delivery.
+// The renderer uses this to fade in only tiles that arrived noticeably late;
+// prefetched or cached tiles (near-zero wait) appear instantly.
+const tileWaits = new Map<string, number>();
+
+/** Milliseconds the tile's last visible consumer waited for it (0 if unknown). */
+export function getTileWait(key: string): number {
+  return tileWaits.get(key) ?? 0;
+}
+
 if (import.meta.env.DEV) {
   // Debug handle for console diagnostics during development.
   (window as unknown as { __tilestore: unknown }).__tilestore = {
@@ -72,6 +95,7 @@ if (import.meta.env.DEV) {
       ready: ready.length,
       loading,
       drainScheduled,
+      deliverBatch,
       byState: [...jobs.values()].reduce<Record<string, number>>((acc, j) => {
         acc[j.state] = (acc[j.state] ?? 0) + 1;
         return acc;
@@ -93,7 +117,7 @@ worker.onmessage = (e: MessageEvent<TileWorkResponse>) => {
     job.reject(new Error(e.data.error));
   } else {
     job.state = 'ready';
-    job.features = e.data.features;
+    job.tile = e.data.tile;
     ready.push({ job, resolve: job.resolve });
     scheduleDrain();
   }
@@ -113,9 +137,9 @@ worker.onerror = (e: ErrorEvent) => {
 };
 
 function enqueue(index: TileIndex, key: string, priority: number): Job {
-  let resolve!: (features: RoadFeature[]) => void;
+  let resolve!: (tile: RoadTile) => void;
   let reject!: (err: unknown) => void;
-  const promise = new Promise<RoadFeature[]>((res, rej) => {
+  const promise = new Promise<RoadTile>((res, rej) => {
     resolve = res;
     reject = rej;
   });
@@ -128,7 +152,7 @@ function enqueue(index: TileIndex, key: string, priority: number): Job {
     index,
     priority,
     state: 'queued',
-    features: null,
+    tile: null,
     promise,
     resolve,
     reject,
@@ -184,11 +208,28 @@ function drain(): void {
   // Visible tiles first: a promoted tile un-blanks the map; a speculative
   // one just warms the cache.
   ready.sort((a, b) => a.job.priority - b.job.priority);
-  const batch = ready.splice(0, DELIVER_PER_FRAME);
+  const batch = ready.splice(0, deliverBatch);
+  const start = performance.now();
   for (const { job, resolve } of batch) {
     job.state = 'done';
-    resolve(job.features!);
+    if (job.requestedAt !== undefined) {
+      if (tileWaits.size > 4096) tileWaits.clear();
+      tileWaits.set(job.key, start - job.requestedAt);
+      job.requestedAt = undefined;
+    }
+    resolve(job.tile!);
   }
+  // The resolves' promise reactions run before this microtask, so `cost`
+  // includes them. Halve the batch when over budget, creep up when well
+  // under — an AIMD controller that converges near the frame budget.
+  queueMicrotask(() => {
+    const cost = performance.now() - start;
+    if (cost > FRAME_BUDGET_MS) {
+      deliverBatch = Math.max(MIN_BATCH, Math.floor(deliverBatch / 2));
+    } else if (cost < FRAME_BUDGET_MS / 2 && deliverBatch < MAX_BATCH) {
+      deliverBatch += 1;
+    }
+  });
   trimResolved();
   scheduleDrain();
 }
@@ -202,14 +243,15 @@ function trimResolved(): void {
 }
 
 /** Load a tile the viewport needs now. Promotes a queued speculative load. */
-export function requestTile(index: TileIndex, signal?: AbortSignal | null): Promise<RoadFeature[]> {
+export function requestTile(index: TileIndex, signal?: AbortSignal | null): Promise<RoadTile> {
   const key = tileKey(index);
   let job = jobs.get(key);
-  let promise: Promise<RoadFeature[]>;
+  let promise: Promise<RoadTile>;
   if (job) {
     // Promotion matters both in the load queue and the delivery queue.
     if (job.state !== 'done') {
       job.priority = VISIBLE;
+      job.requestedAt ??= performance.now();
       promise = job.promise;
     } else {
       // Refresh insertion order so trimResolved evicts least-recently-used.
@@ -219,6 +261,8 @@ export function requestTile(index: TileIndex, signal?: AbortSignal | null): Prom
       // cached zoom level in one already-resolved microtask flush would
       // tessellate it all in a single frame — the hitch, back again.
       job.priority = VISIBLE;
+      // This is a fresh ask, not the original one — restart the wait clock.
+      job.requestedAt = performance.now();
       const fixed = job;
       promise = new Promise((resolve) => {
         ready.push({ job: fixed, resolve });
@@ -227,6 +271,7 @@ export function requestTile(index: TileIndex, signal?: AbortSignal | null): Prom
     }
   } else {
     job = enqueue(index, key, VISIBLE);
+    job.requestedAt = performance.now();
     promise = job.promise;
   }
   if (signal) {
