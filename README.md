@@ -32,10 +32,12 @@ Opens at http://localhost:5173, centered on downtown Tacoma (98402) by default.
 The map is divided into a fixed global grid of 0.05°-degree tiles (`src/overpass.ts`).
 Entering a ZIP geocodes it to a centroid and loads the 3×3 tiles around it in one
 Overpass request. Clicking an unloaded area loads just the tile under the click. After
-any explicit load finishes, the ring of unloaded neighboring tiles is prefetched in the
-background (preloads don't cascade further). Tiles currently being fetched are shown as
-translucent blue rectangles. Roads are deduplicated across tiles by OSM way id, and
-jumping to a new ZIP clears the map and discards any in-flight loads.
+any explicit load or reveal, the ring of unknown neighboring tiles is prefetched in the
+background — but kept hidden in memory until clicked, so the map only grows where the
+user asks it to. Preloaded-and-ready tiles show a faint outline and reveal instantly on
+click; tiles currently being fetched show as translucent blue rectangles. Roads are
+deduplicated across tiles by OSM way id, and jumping to a new ZIP clears the map and
+discards any in-flight loads.
 
 ## Tuning
 

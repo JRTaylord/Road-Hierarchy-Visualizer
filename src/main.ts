@@ -7,13 +7,23 @@ import './style.css';
 
 const DEFAULT_ZIP = '98402'; // downtown Tacoma
 
-const loadedTiles = new Set<string>();
+interface CachedTile {
+  coord: TileCoord;
+  ways: Map<number, RoadFeature>;
+}
+
+// Tiles whose roads are visible on the map.
+const renderedTiles = new Set<string>();
+// Tiles with a fetch in flight (explicit or preload).
 const pendingTiles = new Map<string, TileCoord>();
+// Preloaded tiles: data fetched and held in memory, hidden until clicked.
+const cachedTiles = new Map<string, CachedTile>();
+// Way ids already rendered, so roads spanning tile borders draw once.
 const seenWays = new Set<number>();
 let byTier: RoadFeature[][] = TIERS.map(() => []);
 // Bumped when the user jumps to a new ZIP so stale in-flight loads get discarded.
 let generation = 0;
-// Unloaded tile currently under the cursor, shown as a click-to-load preview.
+// Unrendered tile currently under the cursor, shown as a click-to-load preview.
 let hoverTile: TileCoord | null = null;
 let hoverKey: string | null = null;
 
@@ -79,6 +89,16 @@ function makeLayers() {
       pickable: false,
     }),
     new PolygonLayer<TileCoord>({
+      id: 'tiles-ready',
+      data: [...cachedTiles.values()].map((c) => c.coord),
+      getPolygon: tilePolygon,
+      filled: false,
+      stroked: true,
+      getLineColor: [255, 255, 255, 25],
+      lineWidthMinPixels: 1,
+      pickable: false,
+    }),
+    new PolygonLayer<TileCoord>({
       id: 'tile-hover',
       data: hoverTile ? [hoverTile] : [],
       getPolygon: tilePolygon,
@@ -113,6 +133,34 @@ function rebuild(): void {
   deck.setProps({ layers: makeLayers() });
 }
 
+/** Add ways to the rendered road layers, skipping ways already drawn. */
+function renderWays(ways: Iterable<[number, RoadFeature]>): void {
+  const added: RoadFeature[][] = TIERS.map(() => []);
+  for (const [id, feature] of ways) {
+    if (seenWays.has(id)) continue;
+    seenWays.add(id);
+    const tier = tierOf(feature);
+    if (tier !== undefined) added[tier].push(feature);
+  }
+  byTier = byTier.map((arr, i) => (added[i].length > 0 ? arr.concat(added[i]) : arr));
+}
+
+/** Reveal a preloaded tile instantly and prefetch its neighbors. */
+function revealCached(t: TileCoord): void {
+  const key = tileKey(t);
+  const cached = cachedTiles.get(key);
+  if (!cached) return;
+  cachedTiles.delete(key);
+  renderWays(cached.ways);
+  renderedTiles.add(key);
+  if (hoverKey === key) {
+    hoverKey = null;
+    hoverTile = null;
+  }
+  rebuild();
+  void loadTiles(neighborsOf([t]), { preload: true });
+}
+
 const deck = new Deck({
   parent: document.getElementById('app') as HTMLDivElement,
   initialViewState: {
@@ -131,7 +179,7 @@ const deck = new Deck({
     if (info.coordinate) {
       const t = tileAt(info.coordinate[0], info.coordinate[1]);
       const k = tileKey(t);
-      if (!loadedTiles.has(k) && !pendingTiles.has(k)) next = t;
+      if (!renderedTiles.has(k) && !pendingTiles.has(k)) next = t;
     }
     const nextKey = next ? tileKey(next) : null;
     if (nextKey !== hoverKey) {
@@ -141,14 +189,20 @@ const deck = new Deck({
     }
   },
   onClick: (info) => {
-    if (info.coordinate) {
-      const [lng, lat] = info.coordinate;
-      void loadTiles([tileAt(lng, lat)]);
+    if (!info.coordinate) return;
+    const t = tileAt(info.coordinate[0], info.coordinate[1]);
+    if (cachedTiles.has(tileKey(t))) {
+      revealCached(t);
+    } else {
+      void loadTiles([t]);
     }
   },
 });
 
-/** Unloaded, not-yet-pending tiles adjacent to (or part of) the given set. */
+const isKnown = (key: string): boolean =>
+  renderedTiles.has(key) || pendingTiles.has(key) || cachedTiles.has(key);
+
+/** Unknown tiles adjacent to (or part of) the given set. */
 function neighborsOf(tiles: TileCoord[]): TileCoord[] {
   const out = new Map<string, TileCoord>();
   for (const [tx, ty] of tiles) {
@@ -156,7 +210,7 @@ function neighborsOf(tiles: TileCoord[]): TileCoord[] {
       for (let dx = -1; dx <= 1; dx++) {
         const t: TileCoord = [tx + dx, ty + dy];
         const k = tileKey(t);
-        if (!loadedTiles.has(k) && !pendingTiles.has(k)) out.set(k, t);
+        if (!isKnown(k)) out.set(k, t);
       }
     }
   }
@@ -164,10 +218,7 @@ function neighborsOf(tiles: TileCoord[]): TileCoord[] {
 }
 
 async function loadTiles(tiles: TileCoord[], opts: { preload?: boolean } = {}): Promise<void> {
-  const fresh = tiles.filter((t) => {
-    const key = tileKey(t);
-    return !loadedTiles.has(key) && !pendingTiles.has(key);
-  });
+  const fresh = tiles.filter((t) => !isKnown(tileKey(t)));
   if (fresh.length === 0) return;
 
   const gen = generation;
@@ -182,19 +233,27 @@ async function loadTiles(tiles: TileCoord[], opts: { preload?: boolean } = {}): 
     const ways = await fetchRoadTiles(fresh);
     if (gen !== generation) return; // user jumped to a new ZIP mid-flight
 
-    const added: RoadFeature[][] = TIERS.map(() => []);
-    for (const [id, feature] of ways) {
-      if (seenWays.has(id)) continue;
-      seenWays.add(id);
-      const tier = tierOf(feature);
-      if (tier !== undefined) added[tier].push(feature);
-    }
-    byTier = byTier.map((arr, i) => (added[i].length > 0 ? arr.concat(added[i]) : arr));
-    fresh.forEach((t) => loadedTiles.add(tileKey(t)));
-    if (!opts.preload) {
+    if (opts.preload) {
+      // Hold the data hidden, attributed per tile so a click reveals just that
+      // tile. A way belongs to every fetched tile containing one of its
+      // vertices (a way clipping a tile corner without a vertex inside is
+      // missed — rare, and it appears once a neighboring tile renders).
+      const buckets = new Map<string, CachedTile>(
+        fresh.map((t) => [tileKey(t), { coord: t, ways: new Map() }])
+      );
+      for (const [id, feature] of ways) {
+        for (const [lng, lat] of feature.geometry.coordinates) {
+          buckets.get(tileKey(tileAt(lng, lat)))?.ways.set(id, feature);
+        }
+      }
+      for (const [key, bucket] of buckets) cachedTiles.set(key, bucket);
+    } else {
+      renderWays(ways);
+      fresh.forEach((t) => renderedTiles.add(tileKey(t)));
       setStatus(null);
-      // Prefetch the surrounding ring so the next click is usually instant.
-      // Preloads don't cascade: only explicit loads trigger this.
+      // Prefetch the surrounding ring (hidden until clicked) so the next
+      // click is instant. Preloads don't cascade: only explicit loads and
+      // reveals trigger this.
       void loadTiles(neighborsOf(fresh), { preload: true });
     }
   } catch (err) {
@@ -234,8 +293,9 @@ async function goToZip(zip: string): Promise<void> {
 
   placeEl.textContent = location.label;
   generation++;
-  loadedTiles.clear();
+  renderedTiles.clear();
   pendingTiles.clear();
+  cachedTiles.clear();
   seenWays.clear();
   byTier = TIERS.map(() => []);
   deck.setProps({
